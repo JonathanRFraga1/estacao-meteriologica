@@ -210,7 +210,6 @@
   </div>
 
   <script>
-    // Serviço Serial UART universal BLE (HM-10, AT-09, MLT-BT05, CC2541)
     const UART_SERVICE = 0xFFE0;
     const UART_CHAR    = 0xFFE1;
 
@@ -225,9 +224,8 @@
     }
 
     async function toggleConnect() {
-      // Verificação preventiva de suporte à API
       if (!navigator.bluetooth) {
-        alert("Atenção:\n1. A Web Bluetooth API requer conexão segura (HTTPS ou localhost).\n2. No iPhone (iOS), use o navegador gratuito Bluefy.\n3. No Android, ative o Bluetooth e a Localização (GPS).");
+        alert("Web Bluetooth indisponível. Certifique-se de estar em HTTPS ou localhost (Chrome/Edge no Android/Desktop ou Bluefy no iOS).");
         log("ERRO: navigator.bluetooth indisponível.");
         return;
       }
@@ -238,21 +236,17 @@
       }
 
       try {
-        log("Escaneando dispositivos BLE...");
-        // acceptAllDevices garante que o módulo apareça independentemente do nome anunciado
+        log("Buscando dispositivo...");
         device = await navigator.bluetooth.requestDevice({
           acceptAllDevices: true,
           optionalServices: [UART_SERVICE]
         });
 
         device.addEventListener('gattserverdisconnected', onDisconnected);
-        log(`Conectando ao dispositivo: ${device.name || 'Dispositivo sem nome'}...`);
+        log(`Conectando: ${device.name || 'Módulo BLE'}...`);
         const server = await device.gatt.connect();
 
-        log("Localizando Serviço UART (0xFFE0)...");
         const service = await server.getPrimaryService(UART_SERVICE);
-
-        log("Localizando Característica TX/RX (0xFFE1)...");
         characteristic = await service.getCharacteristic(UART_CHAR);
 
         await characteristic.startNotifications();
@@ -263,10 +257,9 @@
         document.getElementById('btnConnect').textContent = "Desconectar";
         document.getElementById('msgInput').disabled = false;
         document.getElementById('btnSend').disabled = false;
-        log("Conectado! Aguardando fluxo de telemetria...");
-
+        log("Conectado! Telemetria ativa.");
       } catch (err) {
-        log("Erro de conexão: " + err.message);
+        log("Erro: " + err.message);
         onDisconnected();
       }
     }
@@ -279,89 +272,74 @@
       document.getElementById('btnSend').disabled = true;
       device = null;
       characteristic = null;
-      log("Dispositivo desconectado.");
+      log("Desconectado.");
     }
 
-    // O rádio BLE envia pacotes divididos em blocos de até 20 bytes
     function handleNotifications(event) {
-      const value = event.target.value;
       const decoder = new TextDecoder('utf-8');
-      rxBuffer += decoder.decode(value);
+      rxBuffer += decoder.decode(event.target.value);
 
       const lines = rxBuffer.split('\n');
-      rxBuffer = lines.pop(); // Mantém fragmento pendente no buffer
+      rxBuffer = lines.pop(); // Mantém fragmento pendente no acumulador
 
       for (const line of lines) {
-        processarLinha(line.trim());
-      }
-    }
-
-    function processarLinha(l) {
-      if (!l || l.startsWith("==")) return;
-
-      if (l.startsWith("Temp:")) {
-        const val = l.replace("Temp:", "").replace("C", "").trim();
-        document.getElementById('valTemp').innerHTML = `${val} <span style="font-size:0.9rem">°C</span>`;
-      } 
-      else if (l.startsWith("Umidade:")) {
-        const val = l.replace("Umidade:", "").replace("%", "").trim();
-        document.getElementById('valUmi').innerHTML = `${val} <span style="font-size:0.9rem">%</span>`;
-      } 
-      else if (l.startsWith("P. Local:")) {
-        const val = l.replace("P. Local:", "").replace("hPa", "").trim();
-        document.getElementById('valPresLocal').textContent = `Bancada: ${val} hPa`;
-      }
-      else if (l.startsWith("P. QNH:")) {
-        const val = l.replace("P. QNH:", "").replace("hPa", "").trim();
-        document.getElementById('valQnh').innerHTML = `${val} <span style="font-size:0.9rem">hPa</span>`;
-      }
-      else if (l.startsWith("Var 3h:")) {
-        const val = l.replace("Var 3h:", "").replace("hPa", "").trim();
-        const el = document.getElementById('valVar3h');
-        el.innerHTML = `${val} <span style="font-size:0.9rem">hPa</span>`;
-        const num = parseFloat(val);
-        el.style.color = num < -0.8 ? "var(--alert)" : (num > 0.8 ? "var(--success)" : "var(--text)");
-      }
-      else if (l.startsWith("Tendencia:")) {
-        const val = l.replace("Tendencia:", "").trim();
-        document.getElementById('valTendencia').textContent = `Tendência: ${val}`;
-      }
-      else if (l.startsWith("Zambretti:")) {
-        const val = l.replace("Zambretti:", "").trim();
-        document.getElementById('valZambretti').textContent = val;
-      }
-      else if (l.startsWith("T. Orvalho:")) {
-        const val = l.replace("T. Orvalho:", "").replace("C", "").trim();
-        document.getElementById('valOrvalho').textContent = `Orvalho: ${val} °C`;
-      }
-      else if (l.startsWith("Base Nuvens:")) {
-        const val = l.replace("Base Nuvens:", "").replace("m", "").trim();
-        document.getElementById('valNuvens').innerHTML = `${val} <span style="font-size:0.9rem">m</span>`;
-      }
-      else if (l.startsWith("Sensacao:")) {
-        const val = l.replace("Sensacao:", "").replace("C", "").trim();
-        document.getElementById('valSensacao').textContent = `Sensação: ${val} °C`;
-      }
-      else if (l.startsWith("Geada:")) {
-        const val = l.replace("Geada:", "").trim();
-        const el = document.getElementById('valGeada');
-        el.textContent = val;
-        el.style.color = val.includes("ALERTA") ? "var(--alert)" : "var(--success)";
-      }
-      else if (l.startsWith("Chuva:")) {
-        const match = l.match(/Chuva:\s+([A-Z!]+)\s+\(raw:\s*(\d+)\)/);
-        if (match) {
-          const status = match[1];
-          const raw = match[2];
-          const elChuva = document.getElementById('valChuva');
-          elChuva.textContent = status;
-          elChuva.style.color = status === "SIM!" ? "var(--alert)" : "var(--success)";
-          document.getElementById('valChuvaRaw').textContent = `Leitura analógica (A0): ${raw}`;
+        const trimmed = line.trim();
+        if (trimmed.startsWith("$MET,")) {
+          processarTelemetriaCSV(trimmed);
+        } else if (trimmed.startsWith("ACK:")) {
+          log("Confirmação OLED: " + trimmed.substring(4));
         }
       }
     }
 
-    // Envio para o Pager do Arduino via Bluetooth
+    // Processamento direto O(1) sem Regex custoso
+    function processarTelemetriaCSV(linha) {
+      // Formato: $MET,temp,umi,presLocal,qnh,deltaP,tendencia,zambretti,orvalho,baseNuv,sensacao,geada,chuvaRaw
+      const p = linha.split(',');
+      if (p.length < 13) return;
+
+      const temp       = p[1];
+      const umi        = p[2];
+      const presLocal  = p[3];
+      const qnh        = p[4];
+      const deltaP     = parseFloat(p[5]);
+      const tendencia  = p[6];
+      const zambretti  = p[7];
+      const orvalho    = p[8];
+      const baseNuv    = p[9];
+      const sensacao   = p[10];
+      const riscoGeada = p[11] === "1";
+      const chuvaRaw   = parseInt(p[12], 10);
+      const chovendo   = chuvaRaw > 100;
+
+      // Atualização dos Cards
+      document.getElementById('valTemp').innerHTML = `${temp} <span style="font-size:0.9rem">°C</span>`;
+      document.getElementById('valSensacao').textContent = `Sensação: ${sensacao} °C`;
+
+      document.getElementById('valUmi').innerHTML = `${umi} <span style="font-size:0.9rem">%</span>`;
+      document.getElementById('valOrvalho').textContent = `Orvalho: ${orvalho} °C`;
+
+      document.getElementById('valQnh').innerHTML = `${qnh} <span style="font-size:0.9rem">hPa</span>`;
+      document.getElementById('valPresLocal').textContent = `Bancada: ${presLocal} hPa`;
+
+      const elVar = document.getElementById('valVar3h');
+      elVar.innerHTML = `${deltaP > 0 ? '+' : ''}${deltaP.toFixed(1)} <span style="font-size:0.9rem">hPa</span>`;
+      elVar.style.color = deltaP < -0.8 ? "var(--alert)" : (deltaP > 0.8 ? "var(--success)" : "var(--text)");
+
+      document.getElementById('valTendencia').textContent = `Tendência: ${tendencia}`;
+      document.getElementById('valZambretti').textContent = zambretti;
+      document.getElementById('valNuvens').innerHTML = `${baseNuv} <span style="font-size:0.9rem">m</span>`;
+
+      const elGeada = document.getElementById('valGeada');
+      elGeada.textContent = riscoGeada ? "ALERTA RISCO" : "Sem Risco";
+      elGeada.style.color = riscoGeada ? "var(--alert)" : "var(--success)";
+
+      const elChuva = document.getElementById('valChuva');
+      elChuva.textContent = chovendo ? "SIM!" : "NÃO";
+      elChuva.style.color = chovendo ? "var(--alert)" : "var(--success)";
+      document.getElementById('valChuvaRaw').textContent = `Leitura analógica (A0): ${chuvaRaw}`;
+    }
+
     async function enviarMensagem() {
       const input = document.getElementById('msgInput');
       const texto = input.value.trim();
@@ -369,10 +347,9 @@
 
       try {
         const encoder = new TextEncoder();
-        // O Arduino aguarda o terminador '\n' para processar a string
         const data = encoder.encode(texto + "\n");
         await characteristic.writeValue(data);
-        log(`Enviado ao OLED: "${texto}"`);
+        log(`Enviado: "${texto}"`);
         input.value = "";
       } catch (err) {
         log("Falha no envio: " + err.message);
