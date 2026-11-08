@@ -7,48 +7,47 @@
 #include "SSD1306Ascii.h"
 #include "SSD1306AsciiWire.h"
 
-// --- Display OLED Ultraleve ---
+// --- Display OLED ---
 #define I2C_ADDRESS 0x3C
 SSD1306AsciiWire oled;
 
-// --- DHT11 (Pino 2) ---
+// --- DHT11 ---
 #define DHTPIN 2
 #define DHTTYPE DHT11
 DHT dht(DHTPIN, DHTTYPE);
 
-// --- Sensor de Chuva / Nível de Água ---
+// --- Sensor de Chuva ---
 #define PINO_CHUVA A0
 const int LIMIAR_CHUVA = 100;
 
-// --- Módulo Bluetooth BLE / HC-05 (RX: 10, TX: 11) a 38400 baud ---
+// --- Módulo Bluetooth BLE / HC-05 (RX: 10, TX: 11) ---
 SoftwareSerial bluetooth(10, 11);
 Adafruit_BMP280 bmp;
 
-// Altitude local de referência (Erechim/RS)
 const float ALTITUDE_LOCAL = 780.0;
 
-// --- Temporizadores e Intervalos ---
+// --- Temporizadores ---
 unsigned long agora = 0;
+unsigned long ultimoEnvio = 0;
+const unsigned long INTERVALO_ENVIO = 3000UL;
 
-unsigned long ultimoEnvioBT = 0;
-const unsigned long INTERVALO_ENVIO_BT = 3000UL; // Telemetria a cada 3s
-
-// Alternância de páginas no OLED (4 segundos por tela)
 unsigned long ultimaTrocaPagina = 0;
 const unsigned long INTERVALO_PAGINA = 4000UL;
-byte paginaAtual = 0; // 0 = Tempo Real, 1 = Previsão e Índices
+byte paginaAtual = 0;
 
-// --- Buffer de Tendência Barométrica (Padrão OMM: 3 horas) ---
-const int TOTAL_AMOSTRAS = 12; // 12 leituras de 15 min = 180 min (3h)
-const unsigned long INTERVALO_HISTORICO = 900000UL; // 15 minutos em ms (use 10000UL para testes de bancada)
+// --- Buffer Barométrico (3 Horas) ---
+const int TOTAL_AMOSTRAS = 12;
+const unsigned long INTERVALO_HISTORICO = 10000UL; // Ajuste para bancada ou 900000UL para 15 min reais
 float historicoPressao[TOTAL_AMOSTRAS];
 int indiceBuffer = 0;
 int amostrasColetadas = 0;
 unsigned long ultimoRegistroHistorico = 0;
 
-// --- Variáveis do Pager (Recados via Celular) ---
-String textoTratado = "";
-String textoRolagem = "";
+// --- Buffer do Pager (Recepção Segura sem travar loop) ---
+char rxBufferBT[64];
+byte rxIndexBT = 0;
+char textoTratado[64] = "";
+char textoRolagem[80] = "";
 int posRolagem = 0;
 unsigned long ultimoPassoRolagem = 0;
 const unsigned long VELOCIDADE_ROLAGEM = 180UL;
@@ -56,7 +55,6 @@ unsigned long tempoInicioMensagem = 0;
 const unsigned long TEMPO_MINIMO_MENSAGEM = 8000UL;
 bool exibindoMensagem = false;
 
-// Estrutura que agrupa todas as previsões meteorológicas
 struct DadosMeteo {
   float temp;
   float umi;
@@ -72,41 +70,36 @@ struct DadosMeteo {
   const char* zambretti;
 };
 
-// Filtro de caracteres acentuados UTF-8 vindos do teclado do celular
-String sanitizarTexto(String entrada) {
-  String saida = "";
-  int len = entrada.length();
+// Sanitização direta em buffer de caracteres
+void sanitizarCStr(const char* entrada, char* saida, size_t maxLen) {
+  size_t outIdx = 0;
+  size_t inLen = strlen(entrada);
 
-  for (int i = 0; i < len; i++) {
+  for (size_t i = 0; i < inLen && outIdx < maxLen - 1; i++) {
     uint8_t c = (uint8_t)entrada[i];
-
-    if (c == 0xC3 && i + 1 < len) {
+    if (c == 0xC3 && i + 1 < inLen) {
       i++;
       uint8_t c2 = (uint8_t)entrada[i];
-
-      if (c2 >= 0x80 && c2 <= 0x85) saida += 'A';
-      else if (c2 == 0x87)          saida += 'C';
-      else if (c2 >= 0x88 && c2 <= 0x8B) saida += 'E';
-      else if (c2 >= 0x8C && c2 <= 0x8F) saida += 'I';
-      else if (c2 >= 0x92 && c2 <= 0x96) saida += 'O';
-      else if (c2 >= 0x99 && c2 <= 0x9C) saida += 'U';
-      else if (c2 >= 0xA0 && c2 <= 0xA5) saida += 'a';
-      else if (c2 == 0xA7)          saida += 'c';
-      else if (c2 >= 0xA8 && c2 <= 0xAB) saida += 'e';
-      else if (c2 >= 0xAC && c2 <= 0xAF) saida += 'i';
-      else if (c2 >= 0xB2 && c2 <= 0xB6) saida += 'o';
-      else if (c2 >= 0xB9 && c2 <= 0xBC) saida += 'u';
-      else saida += ' ';
+      if (c2 >= 0x80 && c2 <= 0x85)      saida[outIdx++] = 'A';
+      else if (c2 == 0x87)               saida[outIdx++] = 'C';
+      else if (c2 >= 0x88 && c2 <= 0x8B) saida[outIdx++] = 'E';
+      else if (c2 >= 0x8C && c2 <= 0x8F) saida[outIdx++] = 'I';
+      else if (c2 >= 0x92 && c2 <= 0x96) saida[outIdx++] = 'O';
+      else if (c2 >= 0x99 && c2 <= 0x9C) saida[outIdx++] = 'U';
+      else if (c2 >= 0xA0 && c2 <= 0xA5) saida[outIdx++] = 'a';
+      else if (c2 == 0xA7)               saida[outIdx++] = 'c';
+      else if (c2 >= 0xA8 && c2 <= 0xAB) saida[outIdx++] = 'e';
+      else if (c2 >= 0xAC && c2 <= 0xAF) saida[outIdx++] = 'i';
+      else if (c2 >= 0xB2 && c2 <= 0xB6) saida[outIdx++] = 'o';
+      else if (c2 >= 0xB9 && c2 <= 0xBC) saida[outIdx++] = 'u';
+      else                               saida[outIdx++] = ' ';
     } else if (c >= 32 && c <= 126) {
-      saida += (char)c;
+      saida[outIdx++] = (char)c;
     }
   }
-  return saida;
+  saida[outIdx] = '\0';
 }
 
-// --- Funções Físico-Matemáticas de Meteorologia ---
-
-// Fórmula de Magnus-Tetens para Ponto de Orvalho
 float calcularPontoOrvalho(float T, float RH) {
   if (RH <= 0.0) RH = 1.0;
   float a = 17.27;
@@ -115,32 +108,28 @@ float calcularPontoOrvalho(float T, float RH) {
   return (b * alpha) / (a - alpha);
 }
 
-// Equação de Espy para altitude da base de nuvens cumulus (metros)
 float calcularBaseNuvens(float T, float Td) {
   float base = 125.0 * (T - Td);
   return (base < 0.0) ? 0.0 : base;
 }
 
-// Índice de calor / sensação térmica (NOAA)
 float calcularSensacao(float T, float RH) {
   if (T < 27.0 || RH < 40.0) return T;
-  return -8.784 + 1.611 * T + 2.338 * RH - 0.146 * T * RH 
-         - 0.0123 * (T * T) - 0.0164 * (RH * RH) + 0.0022 * (T * T) * RH;
+  return -8.784 + (1.611 * T) + (2.338 * RH) - (0.146 * T * RH)
+         - (0.0123 * T * T) - (0.0164 * RH * RH) + (0.0022 * T * T * RH);
 }
 
-// Redução barométrica ao nível do mar (QNH internacional)
 float calcularQNH(float pEstacao, float T, float altitude) {
   return pEstacao * pow(1.0 - ((0.0065 * altitude) / (T + (0.0065 * altitude) + 273.15)), -5.257);
 }
 
-// Algoritmo de Zambretti (Previsão de 12 a 24 horas)
 const char* calcularZambretti(float qnh, float deltaP) {
   if (deltaP <= -2.0) {
-    return (qnh < 1010.0) ? "Tempestade Iminente" : "Chuva e Vento Forte";
+    return (qnh < 1010.0) ? "Tempestade Iminente" : "Chuva e Vento";
   } else if (deltaP <= -0.8) {
-    return (qnh < 1013.0) ? "Chuva Provavel" : "Tempo Instavel";
+    return (qnh < 1013.0) ? "Chuva Provavel" : "Instavel";
   } else if (deltaP >= 2.0) {
-    return (qnh > 1020.0) ? "Tempo Firme e Seco" : "Tempo Limpando";
+    return (qnh > 1020.0) ? "Firme e Seco" : "Tempo Limpando";
   } else if (deltaP >= 0.8) {
     return (qnh > 1015.0) ? "Melhoria Continua" : "Tempo Bom";
   } else {
@@ -150,7 +139,6 @@ const char* calcularZambretti(float qnh, float deltaP) {
   }
 }
 
-// Consolidação de todas as análises
 DadosMeteo processarMeteorologia() {
   DadosMeteo d;
   d.temp = bmp.readTemperature();
@@ -160,18 +148,17 @@ DadosMeteo processarMeteorologia() {
 
   d.qnh = calcularQNH(d.presLocal, d.temp, ALTITUDE_LOCAL);
 
-  // Análise da variação do buffer de 3h
   if (amostrasColetadas < 2) {
     d.deltaP = 0.0;
     d.simboloTendencia = "[..]";
-    d.descTendencia = "Coletando historico...";
+    d.descTendencia = "Coletando";
   } else {
     int idxMaisAntigo = (amostrasColetadas == TOTAL_AMOSTRAS) ? indiceBuffer : 0;
     d.deltaP = d.presLocal - historicoPressao[idxMaisAntigo];
 
     if (d.deltaP <= -2.0) {
       d.simboloTendencia = "[vv]";
-      d.descTendencia = "Queda Brusca (Alerta)";
+      d.descTendencia = "Queda Brusca";
     } else if (d.deltaP <= -0.8) {
       d.simboloTendencia = "[ v]";
       d.descTendencia = "Queda Moderada";
@@ -195,8 +182,6 @@ DadosMeteo processarMeteorologia() {
 
   return d;
 }
-
-// --- Funções de Renderização no Display OLED ---
 
 void desenharPagina0(const DadosMeteo &d, int leituraChuva, const char* statusChuva) {
   oled.home();
@@ -252,7 +237,7 @@ void desenharPagina1(const DadosMeteo &d) {
   oled.println(" C");
 
   oled.print("Geada:    ");
-  oled.println(d.riscoGeada ? "!ALERTA RISCO!" : "Sem Risco");
+  oled.println(d.riscoGeada ? "!ALERTA!" : "Sem Risco");
 
   oled.print("Var 3h:   ");
   if (d.deltaP > 0) oled.print("+");
@@ -263,21 +248,31 @@ void desenharPagina1(const DadosMeteo &d) {
   oled.print("2/2");
 }
 
-void transmitirTelemetria(Print &porta, const DadosMeteo &d, const char* statusChuva, int leituraChuva) {
-  porta.println(F("========================================"));
-  porta.print(F("Temp:       ")); porta.print(d.temp, 1); porta.println(F(" C"));
-  porta.print(F("Umidade:    ")); porta.print(d.umi, 0); porta.println(F(" %"));
-  porta.print(F("P. Local:   ")); porta.print(d.presLocal, 1); porta.println(F(" hPa"));
-  porta.print(F("P. QNH:     ")); porta.print(d.qnh, 1); porta.println(F(" hPa"));
-  porta.print(F("Var 3h:     ")); porta.print(d.deltaP, 1); porta.println(F(" hPa"));
-  porta.print(F("Tendencia:  ")); porta.println(d.descTendencia);
-  porta.print(F("Zambretti:  ")); porta.println(d.zambretti);
-  porta.print(F("T. Orvalho: ")); porta.print(d.pontoOrvalho, 1); porta.println(F(" C"));
-  porta.print(F("Base Nuvens:")); porta.print(d.baseNuvens, 0); porta.println(F(" m"));
-  porta.print(F("Sensacao:   ")); porta.print(d.sensacao, 1); porta.println(F(" C"));
-  porta.print(F("Geada:      ")); porta.println(d.riscoGeada ? F("SIM (ALERTA)") : F("NAO"));
-  porta.print(F("Chuva:      ")); porta.print(statusChuva);
-  porta.print(F(" (raw: ")); porta.print(leituraChuva); porta.println(F(")"));
+// Transmissão Compacta CSV via BLE (Apenas ~60 bytes)
+void transmitirBLE(const DadosMeteo &d, int leituraChuva) {
+  bluetooth.print(F("$MET,"));
+  bluetooth.print(d.temp, 1); bluetooth.print(',');
+  bluetooth.print(d.umi, 0); bluetooth.print(',');
+  bluetooth.print(d.presLocal, 1); bluetooth.print(',');
+  bluetooth.print(d.qnh, 1); bluetooth.print(',');
+  bluetooth.print(d.deltaP, 1); bluetooth.print(',');
+  bluetooth.print(d.descTendencia); bluetooth.print(',');
+  bluetooth.print(d.zambretti); bluetooth.print(',');
+  bluetooth.print(d.pontoOrvalho, 1); bluetooth.print(',');
+  bluetooth.print(d.baseNuvens, 0); bluetooth.print(',');
+  bluetooth.print(d.sensacao, 1); bluetooth.print(',');
+  bluetooth.print(d.riscoGeada ? 1 : 0); bluetooth.print(',');
+  bluetooth.println(leituraChuva);
+}
+
+// Transmissão Formatada para o Monitor Serial USB (PC)
+void transmitirSerial(const DadosMeteo &d, const char* statusChuva, int leituraChuva) {
+  Serial.print(F("T: ")); Serial.print(d.temp, 1);
+  Serial.print(F("C | Umid: ")); Serial.print(d.umi, 0);
+  Serial.print(F("% | QNH: ")); Serial.print(d.qnh, 1);
+  Serial.print(F("hPa | Zamb: ")); Serial.print(d.zambretti);
+  Serial.print(F(" | Chuva: ")); Serial.print(statusChuva);
+  Serial.print(F(" (")); Serial.print(leituraChuva); Serial.println(F(")"));
 }
 
 void setup() {
@@ -294,100 +289,101 @@ void setup() {
   oled.set1X();
   oled.println("ESTACAO COMPLETA");
   oled.println("METEO + PREVISAO");
-  delay(1000);
+  delay(800);
   oled.clear();
 
   if (!bmp.begin(0x76)) {
-    Serial.println(F("Erro: BMP280 nao detectado!"));
-    bluetooth.println(F("Erro: BMP280 nao detectado!"));
+    Serial.println(F("Erro: BMP280!"));
+    bluetooth.println(F("ERRO:BMP280"));
     oled.println("Erro: BMP280!");
     while (1);
   }
 
-  // Filtro de ruído IIR do BMP280
   bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,
                   Adafruit_BMP280::SAMPLING_X2,
                   Adafruit_BMP280::SAMPLING_X16,
                   Adafruit_BMP280::FILTER_X16,
                   Adafruit_BMP280::STANDBY_MS_500);
 
-  // Inicializa o buffer com a primeira leitura de bancada
   float pInicial = bmp.readPressure() / 100.0F;
   historicoPressao[0] = pInicial;
   indiceBuffer = 1;
   amostrasColetadas = 1;
   ultimoRegistroHistorico = millis();
-
-  bluetooth.println(F("--- Estacao Online: Sensores + Zambretti + Pager ---"));
 }
 
 void loop() {
   agora = millis();
 
-  // 1. Gravação no buffer circular a cada 15 minutos
+  // 1. Buffer histórico barométrico
   if (agora - ultimoRegistroHistorico >= INTERVALO_HISTORICO) {
     ultimoRegistroHistorico = agora;
-    float pressaoInst = bmp.readPressure() / 100.0F;
-    historicoPressao[indiceBuffer] = pressaoInst;
+    historicoPressao[indiceBuffer] = bmp.readPressure() / 100.0F;
     indiceBuffer = (indiceBuffer + 1) % TOTAL_AMOSTRAS;
-
-    if (amostrasColetadas < TOTAL_AMOSTRAS) {
-      amostrasColetadas++;
-    }
+    if (amostrasColetadas < TOTAL_AMOSTRAS) amostrasColetadas++;
   }
 
-  // 2. Recepção de mensagens Bluetooth (Pager)
-  if (bluetooth.available()) {
-    String msgBruta = bluetooth.readStringUntil('\n');
-    msgBruta.trim();
+  // 2. Recepção não-bloqueante do Pager via Bluetooth
+  while (bluetooth.available()) {
+    char c = (char)bluetooth.read();
+    if (c == '\n' || c == '\r') {
+      if (rxIndexBT > 0) {
+        rxBufferBT[rxIndexBT] = '\0';
+        sanitizarCStr(rxBufferBT, textoTratado, sizeof(textoTratado));
+        rxIndexBT = 0;
 
-    if (msgBruta.length() > 0) {
-      textoTratado = sanitizarTexto(msgBruta);
-      exibindoMensagem = true;
-      tempoInicioMensagem = agora;
-      posRolagem = 0;
+        size_t len = strlen(textoTratado);
+        if (len > 0) {
+          exibindoMensagem = true;
+          tempoInicioMensagem = agora;
+          posRolagem = 0;
 
-      if (textoTratado.length() > 10) {
-        textoRolagem = textoTratado + "   ---   ";
-      } else {
-        textoRolagem = textoTratado;
+          if (len > 10) {
+            snprintf(textoRolagem, sizeof(textoRolagem), "%s   ---   ", textoTratado);
+          } else {
+            strncpy(textoRolagem, textoTratado, sizeof(textoRolagem));
+          }
+
+          oled.clear();
+          oled.set1X();
+          oled.println(">> MENSAGEM RECEBIDA <<");
+          oled.println("");
+
+          bluetooth.print(F("ACK:"));
+          bluetooth.println(textoTratado);
+        }
       }
-
-      oled.clear();
-      oled.set1X();
-      oled.println(">> MENSAGEM RECEBIDA <<");
-      oled.println("");
-
-      bluetooth.print(F("Recebido: \""));
-      bluetooth.print(textoTratado);
-      bluetooth.println(F("\""));
+    } else if (rxIndexBT < sizeof(rxBufferBT) - 1) {
+      rxBufferBT[rxIndexBT++] = c;
     }
   }
 
-  // 3. Efeito letreiro digital do Pager
+  // 3. Efeito letreiro no OLED
   if (exibindoMensagem) {
     if (agora - ultimoPassoRolagem >= VELOCIDADE_ROLAGEM) {
       ultimoPassoRolagem = agora;
-
       oled.setCursor(0, 3);
       oled.set2X();
 
-      if (textoTratado.length() <= 10) {
+      size_t lenMsg = strlen(textoTratado);
+      if (lenMsg <= 10) {
         oled.clearToEOL();
         oled.print(textoTratado);
       } else {
-        String janela = "";
+        size_t lenRol = strlen(textoRolagem);
+        char janela[11];
         for (int i = 0; i < 10; i++) {
-          int idx = (posRolagem + i) % textoRolagem.length();
-          janela += textoRolagem[idx];
+          janela[i] = textoRolagem[(posRolagem + i) % lenRol];
         }
+        janela[10] = '\0';
         oled.clearToEOL();
         oled.print(janela);
         posRolagem++;
       }
 
       if (agora - tempoInicioMensagem >= TEMPO_MINIMO_MENSAGEM) {
-        if (textoTratado.length() <= 10 || (posRolagem % textoRolagem.length() == 0)) {
+        size_t lenRol = strlen(textoRolagem);
+        if (lenMsg <= 10 || (lenRol > 0 && (posRolagem % lenRol == 0))) {
           exibindoMensagem = false;
           oled.clear();
         }
@@ -395,13 +391,12 @@ void loop() {
     }
   }
 
-  // 4. Execução Meteorológica: Telas do OLED e Telemetria
+  // 4. Execução Meteorológica
   if (!exibindoMensagem) {
     DadosMeteo dados = processarMeteorologia();
     int leituraChuva = analogRead(PINO_CHUVA);
     const char* statusChuva = (leituraChuva > LIMIAR_CHUVA) ? "SIM!" : "NAO";
 
-    // Paginação do OLED (troca a cada 4 segundos sem piscar)
     if (agora - ultimaTrocaPagina >= INTERVALO_PAGINA) {
       ultimaTrocaPagina = agora;
       paginaAtual = (paginaAtual + 1) % 2;
@@ -414,15 +409,11 @@ void loop() {
       desenharPagina1(dados);
     }
 
-    // 5. Envio periódico para Bluetooth e Serial USB
-    if (agora - ultimoEnvioBT >= INTERVALO_ENVIO_BT) {
-      ultimoEnvioBT = agora;
-
-      // Envia para o rádio BLE (celular/dashboard)
-      transmitirTelemetria(bluetooth, dados, statusChuva, leituraChuva);
-
-      // Espelha no cabo USB (Monitor Serial a 9600 baud)
-      transmitirTelemetria(Serial, dados, statusChuva, leituraChuva);
+    // 5. Transmissão
+    if (agora - ultimoEnvio >= INTERVALO_ENVIO) {
+      ultimoEnvio = agora;
+      transmitirBLE(dados, leituraChuva);
+      transmitirSerial(dados, statusChuva, leituraChuva);
     }
   }
 }
