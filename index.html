@@ -172,12 +172,7 @@
       try {
         log("Solicitando permissão Bluetooth...");
         device = await navigator.bluetooth.requestDevice({
-          filters: [
-            { namePrefix: "HC-" },
-            { namePrefix: "BT" },
-            { namePrefix: "HM" },
-            { namePrefix: "AT" }
-          ],
+          acceptAllDevices: true,
           optionalServices: [UART_SERVICE]
         });
 
